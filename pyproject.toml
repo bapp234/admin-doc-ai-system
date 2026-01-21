@@ -1,0 +1,41 @@
+[project]
+name = "admin-doc-ai-system"
+version = "0.1.0"
+description = "Hệ thống tự động nhận diện và phân loại văn bản hành chính sử dụng OCR & NLP"
+authors = [
+    {name = "bapp234", email = "hoangsang998@gmail.com"}
+]
+requires-python = ">=3.10,<3.12"
+readme = "README.md"
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.12"
+# Thư viện xử lý mảng (bắt buộc cho ảnh)
+numpy = ">=1.26,<2.0"
+# Thư viện xử lý ảnh (bản headless nhẹ hơn, dành cho server/docker, không cần GUI)
+opencv-python-headless = "^4.9.0"
+# Thư viện chuyển PDF sang ảnh
+pdf2image = "^1.17.0"
+# Thư viện hỗ trợ các thuật toán xử lý ảnh nâng cao (nếu OpenCV thiếu)
+scikit-image = "^0.22.0"
+# Quản lý biến môi trường (.env)
+python-dotenv = "^1.0.0"
+# Logging đẹp hơn
+loguru = "^0.7.2"
+pillow = "^12.1.0"
+opencv-python = ">=4.8,<4.9"
+
+[tool.poetry.group.dev.dependencies]
+# Thư viện test
+pytest = "^8.0.0"
+# Kiểm tra phong cách code (Linter)
+black = "^24.0.0"
+flake8 = "^7.0.0"
+pytest-benchmark = "^5.2.3"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

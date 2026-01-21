@@ -1,0 +1,18 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Poetry / Virtual env
+.venv/
+
+# Environment variables
+.env
+
+# Data (OCR input/output)
+data/raw/
+data/processed/
+data/output/
+
+# OS files
+.DS_Store
+Thumbs.db
