@@ -26,7 +26,6 @@ python-dotenv = "^1.0.0"
 # Logging đẹp hơn
 loguru = "^0.7.2"
 pillow = "^12.1.0"
-opencv-python = ">=4.8,<4.9"
 
 [tool.poetry.group.dev.dependencies]
 # Thư viện test
