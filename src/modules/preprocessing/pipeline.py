@@ -73,12 +73,12 @@ class PreprocessingPipeline:
             metadata["remove_shadows"] = True
 
         # 3️⃣ Rough crop (safe margin)
-        h, w = img.shape[:2]
-        img = img[
-            int(0.05*h):int(0.95*h),
-            int(0.05*w):int(0.95*w)
-        ]
-        metadata["rough_crop"] = True
+        # h, w = img.shape[:2]
+        # img = img[
+        #     int(0.05*h):int(0.95*h),
+        #     int(0.05*w):int(0.95*w)
+        # ]
+        # metadata["rough_crop"] = True
 
         # 4️⃣ Auto scan
         if self.config.ENABLE_SCANNER_EFFECT and doc_type == "camera":
