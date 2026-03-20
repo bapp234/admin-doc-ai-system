@@ -16,3 +16,13 @@ data/output/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Bỏ qua các file mô hình AI siêu nặng của Baidu
+.paddleocr/
+.paddlex/
+*.tar
+*.pdmodel
+*.pdiparams
+
+# Bỏ qua thư mục cấu hình của VS Code (để không bị xung đột máy người khác)
+.vscode/
