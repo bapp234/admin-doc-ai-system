@@ -25,7 +25,11 @@ scikit-image = "^0.22.0"
 python-dotenv = "^1.0.0"
 # Logging đẹp hơn
 loguru = "^0.7.2"
-pillow = "^12.1.0"
+pillow = "^10.2.0"
+setuptools = "<70.0.0"
+vietocr = "^0.3.13"
+paddlepaddle = "2.6.2"
+paddleocr = "2.8.1"
 
 [tool.poetry.group.dev.dependencies]
 # Thư viện test

@@ -4,3 +4,5 @@ opencv-python
 pdf2image
 loguru
 numpy
+setuptools
+vietocr
