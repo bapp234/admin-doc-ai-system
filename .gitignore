@@ -12,6 +12,8 @@ __pycache__/
 data/raw/
 data/processed/
 data/output/
+# Giữ lại thư mục data/dataset để đẩy file .csv mồi lên cho đội AI
+!data/dataset/
 
 # OS files
 .DS_Store
@@ -24,5 +26,14 @@ Thumbs.db
 *.pdmodel
 *.pdiparams
 
-# Bỏ qua thư mục cấu hình của VS Code (để không bị xung đột máy người khác)
+# Bỏ qua thư mục cấu hình của VS Code
 .vscode/
+
+# 🔴 BỔ SUNG MỚI: Chặn file mô hình của docTR, PyTorch và PhoBERT (NLP)
+.cache/
+models/
+*.pt
+*.pth
+*.onnx
+*.bin
+*.safetensors

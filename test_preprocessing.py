@@ -118,9 +118,11 @@ def main():
             ocr_result = ocr.extract(img)
                 
             print(f"--- KẾT QUẢ OCR TRANG {page_idx} ---")
-            print(f"Độ tự tin trung bình: {ocr_result['mean_confidence'] * 100:.2f}%")
+            
+            # 🔴 SỬA LẠI 2 DÒNG NÀY CHO KHỚP VỚI DICT TRẢ VỀ TỪ ENGINE
+            print(f"Độ tự tin trung bình: {ocr_result['confidence']}%")
             print("Nội dung:")
-            print(ocr_result['full_text'])
+            print(ocr_result['text'])
             print("-" * 50)
 
     print("\n🏁 TEST HOÀN TẤT")

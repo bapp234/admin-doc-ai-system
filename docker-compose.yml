@@ -5,10 +5,11 @@ services:
     build: 
       context: .
       dockerfile: docker/preprocessing.Dockerfile
-    # Đồng bộ code và thư mục data giữa máy Dev 2 và Container
+    # Đồng bộ code, data và models giữa máy Dev và Container
     volumes:
       - ./src:/app/src
       - ./data:/app/data
       - ./run_pipeline.py:/app/run_pipeline.py
-    # Giữ container chạy ngầm (để dev 2 có thể chui vào gõ lệnh)
+      - ./models:/app/models  # 🔴 Bổ sung: Nơi chứa tạ (weights) của AI sau khi train
+    # Giữ container chạy ngầm
     tty: true
