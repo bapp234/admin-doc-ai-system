@@ -4,3 +4,9 @@ opencv-python
 pdf2image
 loguru
 numpy
+vietocr
+torch
+torchvision
+setuptools<70.0.0
+python-doctr[torch]
+pandas
