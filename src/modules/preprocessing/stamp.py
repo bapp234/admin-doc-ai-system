@@ -8,7 +8,6 @@ def red_stamp(image: np.ndarray, erase: bool = True) -> Tuple[np.ndarray, np.nda
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-    # 1. Mask màu đỏ (2 dải hue)
     lower1 = np.array([0, 80, 80])
     upper1 = np.array([10, 255, 255])
     lower2 = np.array([170, 80, 80])
@@ -18,11 +17,9 @@ def red_stamp(image: np.ndarray, erase: bool = True) -> Tuple[np.ndarray, np.nda
     mask2 = cv2.inRange(hsv, lower2, upper2)
     mask = cv2.bitwise_or(mask1, mask2)
 
-    # 2. Morphology lọc nhiễu
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-    # 3. Connected components
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
 
     final_mask = np.zeros_like(mask)
@@ -37,7 +34,6 @@ def red_stamp(image: np.ndarray, erase: bool = True) -> Tuple[np.ndarray, np.nda
     if not erase:
         return image, final_mask
 
-    # 4. Xóa dấu (chỉ dùng cho scan)
     cleaned = image.copy()
     cleaned[final_mask == 255] = (255, 255, 255)
 

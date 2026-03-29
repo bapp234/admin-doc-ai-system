@@ -2,13 +2,11 @@ import cv2
 import numpy as np
 
 def denoise(image: np.ndarray) -> np.ndarray:
-    """Khử nhiễu"""
-    # fastNlMeansDenoising chạy hơi chậm nhưng kết quả đẹp
-    # Nếu muốn nhanh hơn dùng: return cv2.GaussianBlur(image, (3, 3), 0)
+    
     return cv2.fastNlMeansDenoising(image, None, 10, 7, 21)
 
 def binarize(image: np.ndarray) -> np.ndarray:
-    """Adaptive Thresholding"""
+   
     if len(image.shape) == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
@@ -17,30 +15,23 @@ def binarize(image: np.ndarray) -> np.ndarray:
         cv2.THRESH_BINARY, 11, 2
     )
 def remove_shadows(image: np.ndarray) -> np.ndarray:
-    """
-    Kỹ thuật xóa bóng chuyên sâu bằng Downscale.
-    """
+   
     h, w=image.shape[:2]
 
-    # 1. Thu nhỏ ảnh xuống 1/4 để tăng tốc xử lý tính toán nền 
     small_img = cv2.resize(image, (w // 4, h // 4))
     planes = cv2.split(image)
     small_planes = cv2.split(small_img)
     result_planes = []
     
     for i in range(len(planes)):        
-        # 2. Tính nền trên ảnh NHỎ
         dilated_small = cv2.dilate(small_planes[i], np.ones((7, 7), np.uint8))
         bg_small = cv2.medianBlur(dilated_small, 21)
         
-        # 3. Phóng to nền lên bằng kích thước GỐC
         bg_large = cv2.resize(bg_small, (w, h))
         
-        # 4. Phép chia nền thực hiện trên ảnh GỐC
         diff_img = 255 - cv2.absdiff(planes[i], bg_large)
         norm_img = cv2.normalize(diff_img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
         
-        # Sửa lỗi ảnh quá trắng
         if np.mean(norm_img) > 230:
              gamma = 0.5
              invGamma = 1.0 / gamma
