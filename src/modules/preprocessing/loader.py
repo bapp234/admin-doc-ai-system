@@ -6,9 +6,18 @@ import cv2
 from pdf2image import convert_from_path, pdfinfo_from_path
 from pdf2image.exceptions import PDFInfoNotInstalledError, PDFSyntaxError
 
+from PIL import Image, ImageOps # 🚀 Bổ sung module ImageOps của PIL
+
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    logger.warning("⚠️ Thư viện pillow-heif chưa được cài đặt.")
+
 def load_image(file_path: str, dpi: int = 300, chunk_size: int = 10) -> Generator[Tuple[int, np.ndarray], None, None]:
     path = Path(file_path)
-    if not path.exists(): raise FileNotFoundError(f"404 Not Found: {file_path}")
+    if not path.exists(): 
+        raise FileNotFoundError(f"404 Not Found: {file_path}")
     
     suffix = path.suffix.lower()
 
@@ -31,17 +40,23 @@ def load_image(file_path: str, dpi: int = 300, chunk_size: int = 10) -> Generato
         except PDFSyntaxError:
             raise ValueError("PDF bị lỗi hoặc có mật khẩu.")
 
-    elif suffix in [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"]:
+    elif suffix in [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".heic"]:
         try:
-            with open(file_path, "rb") as f:
-                arr = np.asarray(bytearray(f.read()), dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
-            if img is None: raise ValueError("Ảnh lỗi.")
-            if len(img.shape) == 3 and img.shape[2] == 4:
-                img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-            yield 0, img
+            # 🚀 BÍ KÍP TRỊ LỖI CHỮ DỊ HỢM:
+            # Đọc file bằng PIL và dùng ImageOps.exif_transpose để bẻ ảnh thẳng lại theo đúng góc chụp
+            pil_img = Image.open(file_path)
+            pil_img = ImageOps.exif_transpose(pil_img).convert("RGB")
+            
+            # Đẩy về dạng Numpy Array cho OpenCV xử lý ở các bước sau
+            img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+            if img is None: 
+                raise ValueError(f"Không thể giải mã nội dung ảnh {suffix}.")
+                
+            yield 1, img
+            
         except Exception as e:
-            logger.error(f"Lỗi ảnh: {e}")
-            raise
+            logger.error(f"Lỗi đọc ảnh {file_path}: {e}")
+            raise 
     else:
-        raise ValueError(f"Định dạng không hỗ trợ: {suffix}")
+        logger.warning(f"Định dạng không hỗ trợ: {suffix}")

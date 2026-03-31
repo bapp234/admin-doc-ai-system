@@ -1,74 +1,84 @@
+import sys
 import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
+import gc
 import torch
 import cv2
 import numpy as np
-import logging
 from loguru import logger
 
+from src.modules.ocr.detector import TextDetector
 from src.modules.ocr.recognizer import TextRecognizer
-from src.modules.ocr.layout import LayoutAnalyzer
 from src.modules.ocr.cropper import crop_and_rotate_box
 from src.modules.ocr.post_process import clean_vba_text
 
 torch.set_num_threads(4)
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ['USERPROFILE'] = 'E:/admin-doc-ai-system'
-os.environ['HOME'] = 'E:/admin-doc-ai-system'
-logging.getLogger("ppocr").setLevel(logging.ERROR)
 
 class OCREngine:
     def __init__(self, use_gpu: bool = False):
+        self.detector = TextDetector(use_gpu=use_gpu)
         self.recognizer = TextRecognizer(use_gpu=use_gpu)
-        self.layout_analyzer = LayoutAnalyzer(use_gpu=use_gpu)
 
     def extract(self, img_array: np.ndarray) -> dict:
         try:
-            working_img = img_array
-            sorted_boxes = self.layout_analyzer.get_reading_order(working_img)
+            working_img = img_array.copy()
+            if len(working_img.shape) == 2:
+                working_img = cv2.cvtColor(working_img, cv2.COLOR_GRAY2BGR)
+
+            # 🚀 ĐEO "VÒNG KIM CÔ" CHO AI ĐOÁN GÓC:
+            angle, score = self.detector.get_orientation(working_img)
             rotated_angle = 0
+            
+            # Chỉ cho phép lật ảnh nếu AI có độ tự tin cực cao (trên 95%)
+            if score > 0.95:
+                logger.info(f"🔄 AI phát hiện ảnh ngược {angle} độ (Độ tin cậy {score:.2f}). Đang lật lại...")
+                rotated_angle = angle
+                if angle == 90: working_img = cv2.rotate(working_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                elif angle == 180: working_img = cv2.rotate(working_img, cv2.ROTATE_180)
+                elif angle == 270: working_img = cv2.rotate(working_img, cv2.ROTATE_90_CLOCKWISE)
+            elif angle != 0:
+                logger.debug(f"⚠️ Bỏ qua lật ảnh {angle} độ vì AI không đủ tự tin (Score: {score:.2f} < 0.95)")
 
-            if len(sorted_boxes) < 3:
-                test_img_ccw = cv2.rotate(img_array, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                boxes_ccw = self.layout_analyzer.get_reading_order(test_img_ccw)
-                if len(boxes_ccw) > len(sorted_boxes):
-                    working_img, sorted_boxes, rotated_angle = test_img_ccw, boxes_ccw, 270
-                else:
-                    test_img_cw = cv2.rotate(img_array, cv2.ROTATE_90_CLOCKWISE)
-                    boxes_cw = self.layout_analyzer.get_reading_order(test_img_cw)
-                    if len(boxes_cw) > len(sorted_boxes):
-                        working_img, sorted_boxes, rotated_angle = test_img_cw, boxes_cw, 90
+            boxes = self.detector.detect(working_img)
+            if not boxes: return {"text_lines": [], "text": "", "confidence": 0.0}
 
-            if not sorted_boxes: 
-                return {"text": "", "confidence": 0.0, "rotated_angle": 0}
+            valid_boxes = []
+            cropped_images = []
+            
+            for box in boxes:
+                pts = np.array(box, dtype=np.float32)
+                w = int(max(np.linalg.norm(pts[0] - pts[1]), np.linalg.norm(pts[2] - pts[3])))
+                h = int(max(np.linalg.norm(pts[0] - pts[3]), np.linalg.norm(pts[1] - pts[2])))
+                if w < 10 or h < 10 or h > w * 5: continue
+                cropped_images.append(crop_and_rotate_box(working_img, box))
+                valid_boxes.append(box)
 
-            valid_boxes = [
-                box for box in sorted_boxes
-                if not (max(abs(box[0][0] - box[1][0]), abs(box[3][0] - box[2][0])) < 10 or 
-                        max(abs(box[0][1] - box[3][1]), abs(box[1][1] - box[2][1])) < 10 or 
-                        max(abs(box[0][1] - box[3][1]), abs(box[1][1] - box[2][1])) > max(abs(box[0][0] - box[1][0]), abs(box[3][0] - box[2][0])) * 3)
-            ]
+            if not valid_boxes: return {"text_lines": [], "text": "", "confidence": 0.0}
+
+            # Chạy OCR
+            texts, probs = self.recognizer.recognize_batch(cropped_images)
 
             extracted_items = []
-            for box in valid_boxes:
-                cropped_img = crop_and_rotate_box(working_img, box)
-                text, prob = self.recognizer.recognize(cropped_img)
-                clean_text = clean_vba_text(text)
+            for i, box in enumerate(valid_boxes):
+                clean_text = clean_vba_text(texts[i])
                 if clean_text:
                     cy = (box[0][1] + box[3][1]) / 2
                     left_x = min(box[0][0], box[3][0]) 
-                    extracted_items.append({"text": clean_text, "cy": cy, "left_x": left_x, "prob": prob})
+                    extracted_items.append({"text": clean_text, "cy": cy, "left_x": left_x, "prob": probs[i]})
 
-            if not extracted_items: 
-                return {"text": "", "confidence": 0.0, "rotated_angle": rotated_angle}
+            # 🚀 ĐÒN QUYẾT ĐỊNH: Dọn rác bộ nhớ (Tránh lỗi đọc ẩu ở các file sau)
+            del cropped_images, working_img
+            gc.collect()
+            if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+            if not extracted_items: return {"text_lines": [], "text": "", "confidence": 0.0}
 
             extracted_items.sort(key=lambda item: item['cy'])
-
             lines = []
             current_line = [extracted_items[0]]
             
             for item in extracted_items[1:]:
-                if abs(item['cy'] - current_line[-1]['cy']) < 15:
-                    current_line.append(item)
+                if abs(item['cy'] - current_line[-1]['cy']) < 15: current_line.append(item)
                 else:
                     lines.append(current_line)
                     current_line = [item]
@@ -76,7 +86,6 @@ class OCREngine:
 
             final_text_lines = []
             total_prob = 0
-            
             for line in lines:
                 line.sort(key=lambda item: item['left_x'])
                 line_text = " | ".join([item['text'] for item in line])
@@ -84,6 +93,7 @@ class OCREngine:
                 total_prob += sum([item['prob'] for item in line])
 
             return {
+                "text_lines": final_text_lines, # 🚀 Trả về List để JSON xuống dòng đẹp mắt
                 "text": "\n".join(final_text_lines),
                 "confidence": round((total_prob / len(extracted_items)) * 100, 2),
                 "rotated_angle": rotated_angle
@@ -91,4 +101,4 @@ class OCREngine:
 
         except Exception as e:
             logger.error(f"Engine Error: {e}")
-            return {"text": "", "confidence": 0.0, "rotated_angle": 0}
+            return {"text_lines": [], "text": "", "confidence": 0.0, "rotated_angle": 0}

@@ -1,13 +1,11 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 import cv2
 import numpy as np
 
 def crop(image: np.ndarray) -> np.ndarray:
-    """Cắt viền đen thừa"""
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
-        
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
     coords = cv2.findNonZero(thresh)
     

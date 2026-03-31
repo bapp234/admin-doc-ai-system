@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 import time
 import cv2
 import numpy as np
@@ -45,21 +48,17 @@ class PreprocessingPipeline:
             f"🏁 Done in {int((time.time() - start)*1000)} ms"
         )
 
-    # --------------------------------------------------
-
     def process(self, img: np.ndarray, page_index: int, ocr_engine: str
                 ) -> Dict[str, Any]:
 
         t0 = time.time()
         metadata = {}
 
-        # 0️⃣ Detect document type
         doc_type = detect_document_type(img)
         metadata["doc_type"] = doc_type
 
         apply_profile(self.config, doc_type)
 
-        # 1️⃣ Resize sớm (CPU optimization)
         h, w = img.shape[:2]
         if max(h, w) > self.config.MAX_IMAGE_SIZE:
             scale = self.config.MAX_IMAGE_SIZE / max(h, w)
@@ -67,24 +66,13 @@ class PreprocessingPipeline:
                              interpolation=cv2.INTER_AREA)
             metadata["resized"] = True
 
-        # 2️⃣ Camera only
         if doc_type == "camera":
             img = remove_shadows(img)
             metadata["remove_shadows"] = True
 
-        # 3️⃣ Rough crop (safe margin)
-        # h, w = img.shape[:2]
-        # img = img[
-        #     int(0.05*h):int(0.95*h),
-        #     int(0.05*w):int(0.95*w)
-        # ]
-        # metadata["rough_crop"] = True
-
-        # 4️⃣ Auto scan
         if self.config.ENABLE_SCANNER_EFFECT and doc_type == "camera":
             img = auto_scan_document(img)
 
-        # 5️⃣ Deskew (skip nếu góc nhỏ)
         if self.config.ENABLE_DESKEW:
             img, angle = deskew_image(img)
             if abs(angle) > 0.5:
@@ -94,26 +82,21 @@ class PreprocessingPipeline:
 
         if is_blank(img):
             metadata["quality_warning"] = "blank_page"
-        # 6️⃣ Precise crop
         if self.config.ENABLE_CROP:
             img = crop(img)
 
-        # 7️⃣ Denoise
         if self.config.ENABLE_DENOISE:
             img = denoise(img)
 
-        # 8️⃣ Red stamp (TRƯỚC binarize)
         if self.config.ENABLE_RED_STAMP:
             erase = (doc_type == "scan")
             img, mask = red_stamp(img, erase=erase)
             metadata["has_red_stamp"] = bool(np.any(mask))
             metadata["red_stamp_mode"] = "erase" if erase else "keep"
 
-        # 9️⃣ Binarize
         if self.config.ENABLE_BINARIZATION:
             img = binarize(img)
 
-        # 🔟 Normalize cho OCR engine
         img = normalize_for_ocr(img, ocr_engine)
         metadata["ocr_engine"] = ocr_engine
 

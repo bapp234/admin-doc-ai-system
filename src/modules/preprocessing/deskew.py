@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 import cv2
 import numpy as np
 from typing import Tuple
@@ -8,17 +11,9 @@ def deskew_image(
     max_angle: float = 10.0,
     angle_step: float = 0.5
 ) -> Tuple[np.ndarray, float]:
-    """
-    Xoay ảnh dựa trên Projection Profile (Tối ưu hiệu năng).
-    Không dùng Tesseract AI -> Chỉ xoay nghiêng nhẹ (-10 đến 10 độ).
-    """
     if img is None or img.size == 0: return img, 0.0
-    
-    # 1. Resize để tính toán nhanh
     scale = 1.0
     h, w = img.shape[:2]
-    
-    # Nếu ảnh quá nhỏ thì bỏ qua
     if h < 200 or w < 200: return img, 0.0
 
     if len(img.shape) == 3:
@@ -26,18 +21,15 @@ def deskew_image(
     else:
         gray = img.copy()
 
-    # Downscaling
     working_img = gray
     if w > 1000:
         scale = 1000 / w
         new_h = int(h * scale)
         working_img = cv2.resize(gray, (1000, new_h), interpolation=cv2.INTER_AREA)
 
-    # 2. Threshold Inverse
     blurred = cv2.GaussianBlur(working_img, (5, 5), 0)
     thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
 
-    # 3. Brute-force tìm góc tốt nhất
     best_angle = 0.0
     best_score = -1.0
     wh, ww = thresh.shape
@@ -55,13 +47,11 @@ def deskew_image(
                 borderValue=0
             )
         
-        # Điểm cao nhất = Phương sai lớn nhất của hình chiếu ngang
         score = np.var(np.sum(rotated, axis=1))
         if score > best_score:
             best_score = score
             best_angle = angle
 
-    # 4. Xoay ảnh gốc
     if abs(best_angle) > 0.2:
         logger.info(f"Góc nghiêng: {best_angle:.2f} độ")
         M = cv2.getRotationMatrix2D((w // 2, h // 2), best_angle, 1.0)
