@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 def sort_boxes_layout_aware(boxes, x_threshold=50, y_threshold=15):
     if not boxes: return []
     boxes.sort(key=lambda b: b[0][1])

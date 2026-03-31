@@ -1,3 +1,6 @@
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 import cv2
 import numpy as np
 
@@ -43,7 +46,7 @@ def remove_shadows(image: np.ndarray) -> np.ndarray:
     return cv2.merge(result_planes)
 
 def denoise(image: np.ndarray) -> np.ndarray:
-    return cv2.fastNlMeansDenoising(image, None, 10, 7, 21)
+    return cv2.bilateralFilter(image, 9, 75, 75)
 
 def binarize(image: np.ndarray) -> np.ndarray:
     if len(image.shape) == 3:

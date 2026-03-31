@@ -1,93 +1,104 @@
 import os
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
-os.environ['USERPROFILE'] = PROJECT_ROOT
-os.environ['HOME'] = PROJECT_ROOT
+import cv2
 import json
+import csv
 from loguru import logger
+
 from src.modules.preprocessing.pipeline import PreprocessingPipeline
 from src.modules.preprocessing.config import PreprocessingConfig
 from src.modules.ocr.engine import OCREngine
 from src.modules.nlp.classifier import TextClassifier
 from src.modules.nlp.extractor import InformationExtractor
+from src.utils.hardware import optimize_hardware
 
 INPUT_DIR = "data/raw"
-OUTPUT_DIR = "data/output/e2e_results"
+OUTPUT_BASE_DIR = "data/output/classified_docs"
+DATASET_CSV = "data/dataset/training_dataset.csv"
 
-def run_integration_test():
+def init_dataset_file():
+    os.makedirs(os.path.dirname(DATASET_CSV), exist_ok=True)
+    if not os.path.exists(DATASET_CSV):
+        with open(DATASET_CSV, 'w', encoding='utf-8-sig', newline='') as f:
+            csv.writer(f).writerow(['filename', 'label', 'raw_title', 'clean_text'])
+
+def main():
     print("=" * 60)
-    logger.info("🚀 KHỞI ĐỘNG HỆ THỐNG KIỂM THỬ END-TO-END...")
+    logger.info("🚀 KHỞI ĐỘNG HỆ THỐNG V3 (MULTI-PAGE PDF & TRACEABILITY)")
     
-    # 1. Khởi tạo toàn bộ các "Ổ cắm" AI
-    prep_pipeline = PreprocessingPipeline(PreprocessingConfig())
-    ocr_engine = OCREngine(use_gpu=False)
+    use_gpu = optimize_hardware()
+    init_dataset_file()
+    
+    prep_config = PreprocessingConfig()
+    prep_pipeline = PreprocessingPipeline(prep_config)
+    
+    ocr_engine = OCREngine(use_gpu=use_gpu)
     classifier = TextClassifier()
     extractor = InformationExtractor()
-    print("=" * 60)
     
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    files = [f for f in os.listdir(INPUT_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.pdf'))]
+    valid_exts = {'.png', '.jpg', '.jpeg', '.pdf', '.heic'}
+    files = [f for f in os.listdir(INPUT_DIR) if os.path.splitext(f)[1].lower() in valid_exts]
     
     if not files:
-        logger.warning(f"⚠️ Thư mục {INPUT_DIR} đang trống! Hãy chép vài ảnh vào để test.")
+        logger.warning(f"⚠️ Thư mục {INPUT_DIR} trống.")
         return
 
-    for filename in files:
-        file_path = os.path.join(INPUT_DIR, filename)
-        logger.info(f"\n📦 ĐANG XỬ LÝ TÀI LIỆU: {filename}")
+    with open(DATASET_CSV, 'a', encoding='utf-8-sig', newline='') as dataset_file:
+        csv_writer = csv.writer(dataset_file)
         
-        # ---------------------------------------------------------
-        # GIAI ĐOẠN 1: TIỀN XỬ LÝ (PREPROCESSING)
-        # ---------------------------------------------------------
-        logger.info("1️⃣ [PREPROCESSING] Đang căn chỉnh, khử nhiễu, xóa mộc đỏ...")
-        for prep_result in prep_pipeline.run(file_path):
-            img_processed = prep_result.get("image")
-            page_index = prep_result.get("page_index", 1)
-            prep_meta = prep_result.get("metadata", {})
+        for filename in files:
+            file_path = os.path.join(INPUT_DIR, filename)
+            base_name = os.path.splitext(filename)[0]
+            logger.info(f"\n📦 ĐANG XỬ LÝ: {filename}")
             
-            if img_processed is None:
-                logger.error(f"❌ Tiền xử lý thất bại ở trang {page_index}")
-                continue
+            for prep_result in prep_pipeline.run(file_path, ocr_engine="paddle"):
+                img_processed = prep_result.get("image")
+                page_index = prep_result.get("page_index", 1) # 🚀 LẤY SỐ TRANG
                 
-            # ---------------------------------------------------------
-            # GIAI ĐOẠN 2: NHẬN DẠNG QUANG HỌC (OCR)
-            # ---------------------------------------------------------
-            logger.info(f"2️⃣ [OCR] Đang bóc tách chữ và tái tạo Layout trang {page_index}...")
-            ocr_result = ocr_engine.extract(img_processed)
-            text_content = ocr_result.get("text", "")
-            
-            if not text_content:
-                logger.warning(f"⚠️ Không tìm thấy chữ trên trang {page_index}.")
-                continue
+                if img_processed is None: continue
+                    
+                ocr_result = ocr_engine.extract(img_processed)
+                text_content = ocr_result.get("text", "")
+                text_lines = ocr_result.get("text_lines", [])
                 
-            # ---------------------------------------------------------
-            # GIAI ĐOẠN 3: XỬ LÝ NGÔN NGỮ TỰ NHIÊN (NLP)
-            # ---------------------------------------------------------
-            logger.info("3️⃣ [NLP] Đang phân loại và trích xuất thực thể...")
-            doc_class = classifier.predict(text_content)
-            entities = extractor.extract(text_content)
-            
-            # ---------------------------------------------------------
-            # GIAI ĐOẠN 4: ĐÓNG GÓI KẾT QUẢ VÀ XUẤT JSON
-            # ---------------------------------------------------------
-            final_output = {
-                "file_info": {
-                    "filename": filename,
-                    "page": page_index
-                },
-                "preprocessing_logs": prep_meta,
-                "ai_classification": doc_class,
-                "extracted_data": entities,
-                "ocr_confidence": ocr_result.get("confidence", 0.0),
-                "full_text": text_content
-            }
-            
-            json_filename = f"{os.path.splitext(filename)[0]}_page_{page_index}.json"
-            json_path = os.path.join(OUTPUT_DIR, json_filename)
-            
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(final_output, f, ensure_ascii=False, indent=4)
+                if not text_content: continue
+                    
+                doc_class = classifier.predict(text_content)
+                entities = extractor.extract(text_content)
                 
-            logger.success(f"✅ Luồng dữ liệu THÔNG SUỐT! Kết quả lưu tại: {json_path}")
+                label = doc_class.get("label", "CHUA_PHAN_LOAI")
+                raw_title = doc_class.get("raw_title", "")
+                
+                # =========================================================
+                # LOGIC LƯU TRỮ CHUYÊN SÂU (MULTI-PAGE)
+                # =========================================================
+                target_folder = os.path.join(OUTPUT_BASE_DIR, label)
+                os.makedirs(target_folder, exist_ok=True)
+                
+                # 1. Định danh cấp độ trang (VD: hoso_page_1)
+                page_identifier = f"{base_name}_page_{page_index}"
+                
+                # 2. Lưu trực tiếp MỘT TRANG ĐÓ thành ảnh JPG thay vì copy cả cục PDF
+                target_image_path = os.path.join(target_folder, f"{page_identifier}.jpg")
+                cv2.imwrite(target_image_path, img_processed)
+                
+                # 3. Format JSON có tính năng LƯU VẾT (Traceability)
+                final_data = {
+                    "original_file": filename,   # 🚀 Phục vụ việc gom file sau này
+                    "page_index": page_index,    # 🚀 Thứ tự trang
+                    "document_type": label,
+                    "confidence": doc_class.get("confidence", 0.0),
+                    "extracted_entities": entities,
+                    "clean_text_lines": text_lines 
+                }
+                
+                json_path = os.path.join(target_folder, f"{page_identifier}.json")
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(final_data, f, ensure_ascii=False, indent=4)
+                    
+                # 4. Ghi rõ số trang vào Dataset
+                csv_writer.writerow([f"{page_identifier}.jpg", label, raw_title, text_content.replace('\n', ' ')])
+                
+                logger.success(f"✅ Label [{label}] -> {page_identifier} -> OK")
 
 if __name__ == "__main__":
-    run_integration_test()
+    main()
