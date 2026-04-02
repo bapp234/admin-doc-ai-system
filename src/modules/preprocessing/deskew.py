@@ -1,6 +1,5 @@
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 import cv2
 import numpy as np
 from typing import Tuple
@@ -8,8 +7,8 @@ from loguru import logger
 
 def deskew_image(
     img: np.ndarray,
-    max_angle: float = 10.0,
-    angle_step: float = 0.5
+    max_angle: float = 5.0,
+    angle_step: float = 1.0
 ) -> Tuple[np.ndarray, float]:
     if img is None or img.size == 0: return img, 0.0
     scale = 1.0
