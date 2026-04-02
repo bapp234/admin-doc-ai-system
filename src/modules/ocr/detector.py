@@ -1,7 +1,7 @@
 import os
+import os
 import sys
 import numpy as np
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
 os.environ['USERPROFILE'] = PROJECT_ROOT

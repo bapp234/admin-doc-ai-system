@@ -1,6 +1,6 @@
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
+
 def apply_profile(config, doc_type: str):
     if doc_type == "scan":
         config.ENABLE_SCANNER_EFFECT = False

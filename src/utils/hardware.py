@@ -1,7 +1,5 @@
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
-import os
 import torch
 from loguru import logger
 
@@ -16,8 +14,11 @@ def optimize_hardware() -> bool:
     if torch.cuda.is_available():
         device_name = torch.cuda.get_device_name(0)
         torch.cuda.empty_cache()
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cudnn.deterministic = True
+        # Enable cuDNN autotuner for better performance on fixed-size inputs
+        torch.backends.cudnn.benchmark = True
+        # Prefer performance over strict determinism for throughput
+        torch.backends.cudnn.deterministic = False
+        logger.info(f"Using GPU: {device_name}")
         return True
     else:
         return False
