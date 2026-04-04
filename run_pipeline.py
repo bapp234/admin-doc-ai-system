@@ -8,6 +8,7 @@ import time
 import threading
 import concurrent.futures
 from loguru import logger
+import numpy as np
 
 from src.modules.preprocessing.pipeline import PreprocessingPipeline
 from src.modules.preprocessing.config import PreprocessingConfig
@@ -19,6 +20,8 @@ from src.utils.hardware import optimize_hardware
 INPUT_DIR = "data/raw"
 OUTPUT_BASE_DIR = "data/output/classified_docs"
 DATASET_CSV = "data/dataset/training_dataset.csv"
+# Toggle whether a confident header should trigger an early-exit (skip full-page OCR)
+ENABLE_EARLY_EXIT = False
 
 def init_dataset_file():
     os.makedirs(os.path.dirname(DATASET_CSV), exist_ok=True)
@@ -81,7 +84,8 @@ def main():
     # Thread pool for concurrent page processing (3-4 workers)
     csv_lock = threading.Lock()
     thread_local = threading.local()
-    WORKERS = min(4, max(1, (os.cpu_count() or 4)))
+    # Use a single worker to avoid RAM thrashing on low-memory hosts
+    WORKERS = 1
 
     def _init_thread_objects():
         # Initialize heavy objects once per worker thread
@@ -104,16 +108,37 @@ def main():
             img_processed = task['img_processed']
             preprocessing_time_ms = int(task.get('preprocessing_time_ms', 0) or 0)
 
-            # Header-only fast pass
+            # Header-only fast pass using detector pre-check and header boxes
             HEADER_FRACTION = 0.30
-            h = img_processed.shape[0]
-            header_h = max(24, int(h * HEADER_FRACTION))
-            header_img = img_processed[0:header_h].copy()
+            # 1) Detect + normalize orientation on full page (ensures working_img and boxes are valid)
+            try:
+                pre = ocr.detect_and_normalize(img_processed)
+                working_img = pre.get('working_img', img_processed)
+                boxes = pre.get('boxes', []) or []
+                detection_time_ms = int(pre.get('detection_time_ms', 0) or 0)
+                rotated_angle = int(pre.get('rotated_angle', 0) or 0)
+            except Exception:
+                working_img = img_processed
+                boxes = []
+                detection_time_ms = 0
+                rotated_angle = 0
+
+            h_work = working_img.shape[0]
+            header_h = max(24, int(h_work * HEADER_FRACTION))
+            header_boxes = []
+            for b in boxes:
+                try:
+                    pts = np.array(b, dtype=np.float32)
+                    cy = (pts[0][1] + pts[3][1]) / 2
+                    if cy <= header_h:
+                        header_boxes.append(b)
+                except Exception:
+                    continue
 
             try:
-                header_ocr = ocr.extract(header_img, fast_mode=True)
+                header_ocr = ocr.recognize_from_boxes(working_img, header_boxes, detection_time_ms=detection_time_ms)
             except Exception:
-                header_ocr = {"text": "", "text_lines": [], "confidence": 0.0, "detection_time_ms": 0, "recognition_time_ms": 0, "boxes_count": 0, "valid_boxes_count": 0}
+                header_ocr = {"text": "", "text_lines": [], "confidence": 0.0, "detection_time_ms": detection_time_ms, "recognition_time_ms": 0, "boxes_count": 0, "valid_boxes_count": 0}
 
             header_text = header_ocr.get("text", "")
             header_text_lines = header_ocr.get("text_lines", [])
@@ -132,57 +157,65 @@ def main():
 
             hdr_label = header_class.get("label", "KHAC")
             hdr_conf = float(header_class.get("confidence", 0.0) or 0.0)
-            if hdr_label not in ("KHAC", "CHUA_PHAN_LOAI") and hdr_conf > 0.80:
+            # EARLY EXIT if header classifier is highly confident (>0.85)
+            if hdr_label not in ("KHAC", "CHUA_PHAN_LOAI") and hdr_conf > 0.85:
                 label = hdr_label
                 raw_title = header_class.get("raw_title", "")
-                target_folder = os.path.join(OUTPUT_BASE_DIR, label)
-                os.makedirs(target_folder, exist_ok=True)
-                target_image_path = os.path.join(target_folder, f"{page_identifier}.jpg")
-                try:
-                    _atomic_save_image(img_processed, target_image_path)
-                except Exception:
+                if ENABLE_EARLY_EXIT:
+                    target_folder = os.path.join(OUTPUT_BASE_DIR, label)
+                    os.makedirs(target_folder, exist_ok=True)
+                    target_image_path = os.path.join(target_folder, f"{page_identifier}.jpg")
                     try:
-                        cv2.imwrite(target_image_path, img_processed)
+                        _atomic_save_image(working_img, target_image_path)
                     except Exception:
-                        logger.exception("Failed to save page image on early-exit")
+                        try:
+                            cv2.imwrite(target_image_path, working_img)
+                        except Exception:
+                            logger.exception("Failed to save page image on early-exit")
 
-                total_time_ms = preprocessing_time_ms + int(header_ocr.get('detection_time_ms', 0) or 0) + int(header_ocr.get('recognition_time_ms', 0) or 0) + header_nlp_time_ms
-                final_data = {
-                    "original_file": filename,
-                    "page_index": page_index,
-                    "document_type": label,
-                    "confidence": header_class.get("confidence", 0.0),
-                    "extracted_entities": header_entities,
-                    "clean_text_lines": header_text_lines,
-                    "cleaned_text": cleaned_header if header_text else "",
-                    "boxes_count": int(header_ocr.get('boxes_count', 0) or 0),
-                    "valid_boxes_count": int(header_ocr.get('valid_boxes_count', 0) or 0),
-                    "early_exit": True,
-                    "early_exit_reason": "header_confident",
-                    "processing_time_ms": {
-                        "preprocessing": preprocessing_time_ms,
-                        "ocr_detection": int(header_ocr.get('detection_time_ms', 0) or 0),
-                        "ocr_recognition": int(header_ocr.get('recognition_time_ms', 0) or 0),
-                        "nlp": header_nlp_time_ms,
-                        "total": total_time_ms
+                    total_time_ms = preprocessing_time_ms + int(header_ocr.get('detection_time_ms', 0) or 0) + int(header_ocr.get('recognition_time_ms', 0) or 0) + header_nlp_time_ms
+                    final_data = {
+                        "original_file": filename,
+                        "page_index": page_index,
+                        "document_type": label,
+                        "confidence": header_class.get("confidence", 0.0),
+                        "extracted_entities": header_entities,
+                        "clean_text_lines": header_text_lines,
+                        "cleaned_text": cleaned_header if header_text else "",
+                        "boxes_count": int(header_ocr.get('boxes_count', 0) or 0),
+                        "valid_boxes_count": int(header_ocr.get('valid_boxes_count', 0) or 0),
+                        "early_exit": True,
+                        "early_exit_reason": "header_confident",
+                        "processing_time_ms": {
+                            "preprocessing": preprocessing_time_ms,
+                            "ocr_detection": int(header_ocr.get('detection_time_ms', 0) or 0),
+                            "ocr_recognition": int(header_ocr.get('recognition_time_ms', 0) or 0),
+                            "nlp": header_nlp_time_ms,
+                            "total": total_time_ms
+                        }
                     }
-                }
 
-                json_path = os.path.join(target_folder, f"{page_identifier}.json")
-                try:
-                    _atomic_write_json(final_data, json_path)
-                except Exception:
-                    with open(json_path, 'w', encoding='utf-8') as f:
-                        json.dump(final_data, f, ensure_ascii=False, indent=4)
+                    json_path = os.path.join(target_folder, f"{page_identifier}.json")
+                    try:
+                        _atomic_write_json(final_data, json_path)
+                    except Exception:
+                        with open(json_path, 'w', encoding='utf-8') as f:
+                            json.dump(final_data, f, ensure_ascii=False, indent=4)
 
-                with csv_lock:
-                    csv_writer.writerow([f"{page_identifier}.jpg", label, raw_title, (cleaned_header if header_text else "").replace('\n', ' ')])
+                    with csv_lock:
+                        csv_writer.writerow([f"{page_identifier}.jpg", label, raw_title, (cleaned_header if header_text else "").replace('\n', ' ')])
 
-                logger.success(f"⚡ Early Exit via Header! Label [{label}] -> {page_identifier}")
-                return
+                    logger.success(f"⚡ Early Exit via Header! Label [{label}] -> {page_identifier}")
+                    return
+                else:
+                    logger.info(f"Header matched: Label [{label}] (conf {hdr_conf:.2f}) — early-exit disabled, continuing full-page OCR")
 
-            # Full OCR path
-            ocr_result = ocr.extract(img_processed)
+            # Full OCR path - prefer using pre-detected boxes to avoid re-detection
+            if boxes:
+                ocr_result = ocr.recognize_from_boxes(working_img, boxes, detection_time_ms=detection_time_ms)
+            else:
+                ocr_result = ocr.extract(img_processed)
+
             text_content = ocr_result.get("text", "")
             text_lines = ocr_result.get("text_lines", [])
 
@@ -210,10 +243,10 @@ def main():
             os.makedirs(target_folder, exist_ok=True)
             target_image_path = os.path.join(target_folder, f"{page_identifier}.jpg")
             try:
-                _atomic_save_image(img_processed, target_image_path)
+                _atomic_save_image(working_img if 'working_img' in locals() else img_processed, target_image_path)
             except Exception:
                 try:
-                    cv2.imwrite(target_image_path, img_processed)
+                    cv2.imwrite(target_image_path, (working_img if 'working_img' in locals() else img_processed))
                 except Exception:
                     logger.exception("Failed to save page image")
 
