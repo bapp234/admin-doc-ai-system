@@ -5,10 +5,25 @@ import csv
 import unicodedata
 import re
 import time
+import sys
+import gc
 import threading
 import concurrent.futures
-from loguru import logger
+try:
+    from loguru import logger
+except Exception:
+    import logging
+    logger = logging.getLogger("run_pipeline")
+    if not logger.handlers:
+        ch = logging.StreamHandler()
+        ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        logger.addHandler(ch)
+    logger.setLevel(logging.INFO)
 import numpy as np
+try:
+    import torch
+except Exception:
+    torch = None
 
 from src.modules.preprocessing.pipeline import PreprocessingPipeline
 from src.modules.preprocessing.config import PreprocessingConfig
@@ -22,12 +37,32 @@ OUTPUT_BASE_DIR = "data/output/classified_docs"
 DATASET_CSV = "data/dataset/training_dataset.csv"
 # Toggle whether a confident header should trigger an early-exit (skip full-page OCR)
 ENABLE_EARLY_EXIT = False
+# Data collection mode: build a single CSV for training (text,label)
+DATA_COLLECTION_MODE = False
+DATA_COLLECTION_CSV = "data/dataset/collected_dataset.csv"
+# 'header' to collect header text when available, 'full' to collect full-page text
+DATA_COLLECTION_SOURCE = "header"
+# If True, include classifier-predicted label in the 'label' column; else leave label empty for manual labeling
+DATA_COLLECTION_PRELABEL = False
+# When True, treat each input file as a single logical document and only
+# collect samples from the first page (page_index == 1). This prevents
+# multi-page single-document PDFs from polluting the collection CSV with
+# subsequent pages that don't contain headers.
+# NOTE: multi-page files are processed page-by-page; data collection will
+# collect samples from all pages when enabled.
 
 def init_dataset_file():
     os.makedirs(os.path.dirname(DATASET_CSV), exist_ok=True)
     if not os.path.exists(DATASET_CSV):
         with open(DATASET_CSV, 'w', encoding='utf-8-sig', newline='') as f:
             csv.writer(f).writerow(['filename', 'label', 'raw_title', 'clean_text'])
+
+
+def init_collection_file():
+    os.makedirs(os.path.dirname(DATA_COLLECTION_CSV), exist_ok=True)
+    if not os.path.exists(DATA_COLLECTION_CSV):
+        with open(DATA_COLLECTION_CSV, 'w', encoding='utf-8-sig', newline='') as f:
+            csv.writer(f).writerow(['text', 'label'])
 
 
 def slugify(name: str) -> str:
@@ -87,12 +122,18 @@ def main():
     # Use a single worker to avoid RAM thrashing on low-memory hosts
     WORKERS = 1
 
+    # Load heavy models once (singleton) to avoid repeated initialization
+    ocr_singleton = OCREngine(use_gpu=use_gpu)
+    classifier_singleton = TextClassifier()
+    extractor_singleton = InformationExtractor()
+
     def _init_thread_objects():
         # Initialize heavy objects once per worker thread
         if not getattr(thread_local, 'initialized', False):
-            thread_local.ocr_engine = OCREngine(use_gpu=use_gpu)
-            thread_local.classifier = TextClassifier()
-            thread_local.extractor = InformationExtractor()
+            # attach shared singletons to thread-local storage for convenience
+            thread_local.ocr_engine = ocr_singleton
+            thread_local.classifier = classifier_singleton
+            thread_local.extractor = extractor_singleton
             thread_local.initialized = True
 
     def process_page_task(task, csv_writer, csv_lock):
@@ -154,6 +195,17 @@ def main():
             else:
                 header_class = {"label": "KHAC", "confidence": 0.0, "raw_title": ""}
                 header_entities = {}
+
+            # DATA COLLECTION: write header sample to the collection CSV if requested
+            if DATA_COLLECTION_MODE and collection_writer is not None:
+                try:
+                    if DATA_COLLECTION_SOURCE == 'header' and header_text and header_text.strip():
+                        collect_text = cleaned_header.replace('\n', ' ') if cleaned_header else header_text.replace('\n', ' ')
+                        collect_label = header_class.get('label', '') if DATA_COLLECTION_PRELABEL else ''
+                        with csv_lock:
+                            collection_writer.writerow([collect_text, collect_label])
+                except Exception:
+                    logger.exception('Failed to write header sample to collection CSV')
 
             hdr_label = header_class.get("label", "KHAC")
             hdr_conf = float(header_class.get("confidence", 0.0) or 0.0)
@@ -236,6 +288,25 @@ def main():
             nlp_end = time.time()
             nlp_time_ms = int((nlp_end - nlp_start) * 1000)
 
+            # DATA COLLECTION: write full-page sample when requested (or when header absent and source='header')
+            if DATA_COLLECTION_MODE and collection_writer is not None:
+                try:
+                    write_full = False
+                    if DATA_COLLECTION_SOURCE == 'full':
+                        write_full = True
+                    elif DATA_COLLECTION_SOURCE == 'header':
+                        # header_text may be defined earlier; only write full if header was missing
+                        if not (header_text and header_text.strip()):
+                            write_full = True
+
+                    if write_full:
+                        collect_text = cleaned_for_nlp.replace('\n', ' ') if cleaned_for_nlp else text_content.replace('\n', ' ')
+                        collect_label = doc_class.get('label', '') if DATA_COLLECTION_PRELABEL else ''
+                        with csv_lock:
+                            collection_writer.writerow([collect_text, collect_label])
+                except Exception:
+                    logger.exception('Failed to write full-page sample to collection CSV')
+
             label = doc_class.get("label", "CHUA_PHAN_LOAI")
             raw_title = doc_class.get("raw_title", "")
 
@@ -284,80 +355,130 @@ def main():
             logger.success(f"✅ Label [{label}] -> {page_identifier} -> OK")
 
         except Exception as e:
-            logger.exception(f"Worker error processing {task.get('page_identifier')}: {e}")
+            logger.error(f"Worker error processing {task.get('page_identifier')}: {e}")
+        finally:
+            # Aggressively free memory after each page to avoid thrashing
+            try:
+                gc.collect()
+            except Exception:
+                pass
+            try:
+                if 'torch' in globals() and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    # Initialize collection CSV if requested
+    if DATA_COLLECTION_MODE:
+        init_collection_file()
+
+    collection_file = None
+    collection_writer = None
 
     with open(DATASET_CSV, 'a', encoding='utf-8-sig', newline='') as dataset_file:
         csv_writer = csv.writer(dataset_file)
+        # Open collection CSV writer when in collection mode
+        if DATA_COLLECTION_MODE:
+            collection_file = open(DATA_COLLECTION_CSV, 'a', encoding='utf-8-sig', newline='')
+            collection_writer = csv.writer(collection_file)
+
         futures = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as executor:
             for filename in files:
-                file_path = os.path.join(INPUT_DIR, filename)
-                base_name_raw = os.path.splitext(filename)[0]
-                base_name = slugify(base_name_raw)
-                logger.info(f"\n📦 ĐANG XỬ LÝ: {filename}")
+                try:
+                    file_path = os.path.join(INPUT_DIR, filename)
+                    base_name_raw = os.path.splitext(filename)[0]
+                    base_name = slugify(base_name_raw)
+                    logger.info(f"\n📦 ĐANG XỬ LÝ: {filename}")
 
-                for prep_result in prep_pipeline.run(file_path, ocr_engine="paddle"):
-                    img_processed = prep_result.get("image")
-                    page_index = prep_result.get("page_index", 1)
-                    page_identifier = f"{base_name}_page_{page_index}"
+                    for prep_result in prep_pipeline.run(file_path, ocr_engine="paddle"):
+                        img_processed = prep_result.get("image")
+                        page_index = prep_result.get("page_index", 1)
+                        page_identifier = f"{base_name}_page_{page_index}"
 
-                    if img_processed is None:
-                        continue
+                        if img_processed is None:
+                            continue
 
-                    metadata = prep_result.get('metadata', {}) or {}
-                    if metadata.get('quality_warning') == 'blank_page':
-                        logger.warning(f"⚠️ Bỏ qua trang trống: {filename} page {page_index}")
-                        target_folder = os.path.join(OUTPUT_BASE_DIR, 'KHONG_XAC_DINH')
-                        os.makedirs(target_folder, exist_ok=True)
-                        target_image_path = os.path.join(target_folder, f"{page_identifier}.jpg")
-                        try:
-                            _atomic_save_image(img_processed, target_image_path)
-                        except Exception:
+                        metadata = prep_result.get('metadata', {}) or {}
+                        if metadata.get('quality_warning') == 'blank_page':
+                            logger.warning(f"⚠️ Bỏ qua trang trống: {filename} page {page_index}")
+                            target_folder = os.path.join(OUTPUT_BASE_DIR, 'KHONG_XAC_DINH')
+                            os.makedirs(target_folder, exist_ok=True)
+                            target_image_path = os.path.join(target_folder, f"{page_identifier}.jpg")
                             try:
-                                cv2.imwrite(target_image_path, img_processed)
+                                _atomic_save_image(img_processed, target_image_path)
                             except Exception:
-                                logger.exception("Failed to save blank-page image")
+                                try:
+                                    cv2.imwrite(target_image_path, img_processed)
+                                except Exception:
+                                    logger.error("Failed to save blank-page image")
+
+                            preprocessing_time_ms = int(prep_result.get('processing_time_ms', 0) or 0)
+                            final_data = {
+                                "original_file": filename,
+                                "page_index": page_index,
+                                "document_type": "KHONG_XAC_DINH",
+                                "confidence": 0.0,
+                                "extracted_entities": {},
+                                "clean_text_lines": [],
+                                "processing_time_ms": {
+                                    "preprocessing": preprocessing_time_ms,
+                                    "ocr_detection": 0,
+                                    "ocr_recognition": 0,
+                                    "nlp": 0,
+                                    "total": preprocessing_time_ms
+                                }
+                            }
+                            json_path = os.path.join(target_folder, f"{page_identifier}.json")
+                            try:
+                                _atomic_write_json(final_data, json_path)
+                            except Exception:
+                                with open(json_path, 'w', encoding='utf-8') as f:
+                                    json.dump(final_data, f, ensure_ascii=False, indent=4)
+                            with csv_lock:
+                                csv_writer.writerow([f"{page_identifier}.jpg", "KHONG_XAC_DINH", "", ""])
+                            logger.info(f"⏭️ Bỏ qua trang trống -> {page_identifier}")
+                            continue
 
                         preprocessing_time_ms = int(prep_result.get('processing_time_ms', 0) or 0)
-                        final_data = {
-                            "original_file": filename,
-                            "page_index": page_index,
-                            "document_type": "KHONG_XAC_DINH",
-                            "confidence": 0.0,
-                            "extracted_entities": {},
-                            "clean_text_lines": [],
-                            "processing_time_ms": {
-                                "preprocessing": preprocessing_time_ms,
-                                "ocr_detection": 0,
-                                "ocr_recognition": 0,
-                                "nlp": 0,
-                                "total": preprocessing_time_ms
-                            }
+
+                        task = {
+                            'filename': filename,
+                            'base_name': base_name,
+                            'page_index': page_index,
+                            'page_identifier': page_identifier,
+                            'img_processed': img_processed,
+                            'preprocessing_time_ms': preprocessing_time_ms
                         }
-                        json_path = os.path.join(target_folder, f"{page_identifier}.json")
+
+                        fut = executor.submit(process_page_task, task, csv_writer, csv_lock)
+                        futures.append(fut)
+
+                    # Wait for all submitted tasks for this file to finish before moving to next file
+                    for fut in concurrent.futures.as_completed(futures):
                         try:
-                            _atomic_write_json(final_data, json_path)
+                            fut.result()
                         except Exception:
-                            with open(json_path, 'w', encoding='utf-8') as f:
-                                json.dump(final_data, f, ensure_ascii=False, indent=4)
-                        with csv_lock:
-                            csv_writer.writerow([f"{page_identifier}.jpg", "KHONG_XAC_DINH", "", ""])
-                        logger.info(f"⏭️ Bỏ qua trang trống -> {page_identifier}")
-                        continue
+                            logger.exception("Error in page worker")
 
-                    preprocessing_time_ms = int(prep_result.get('processing_time_ms', 0) or 0)
+                    # Free memory after finishing this file
+                    try:
+                        gc.collect()
+                    except Exception:
+                        pass
+                    try:
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
 
-                    task = {
-                        'filename': filename,
-                        'base_name': base_name,
-                        'page_index': page_index,
-                        'page_identifier': page_identifier,
-                        'img_processed': img_processed,
-                        'preprocessing_time_ms': preprocessing_time_ms
-                    }
+                    # reset futures list for next file
+                    futures = []
 
-                    fut = executor.submit(process_page_task, task, csv_writer, csv_lock)
-                    futures.append(fut)
+                except Exception as e:
+                    logger.error(f"Error processing file {filename}: {e}")
+                    # continue to next file
+                    continue
 
             # Wait for all submitted tasks to finish and surface exceptions
             for fut in concurrent.futures.as_completed(futures):
@@ -365,6 +486,62 @@ def main():
                     fut.result()
                 except Exception:
                     logger.exception("Error in page worker")
+        # Close collection file if opened
+        if collection_file is not None:
+            try:
+                collection_file.close()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Run document processing pipeline')
+    parser.add_argument('--collect', action='store_true', help='Enable data collection mode (append to collection CSV)')
+    parser.add_argument('--source', choices=['header', 'full'], help='Collection source: header or full')
+    parser.add_argument('--prelabel', action='store_true', help='Include predicted label in collection CSV')
+    parser.add_argument('--enable-early-exit', dest='enable_early_exit', action='store_true', help='Enable early-exit behavior when header classifier is confident')
+    parser.add_argument('--no-early-exit', dest='no_early_exit', action='store_true', help='Explicitly disable early-exit')
+    parser.add_argument('--clear', dest='clear', action='store_true', help='Delete collection CSV and clear data/output/ before running')
+
+    args = parser.parse_args()
+
+    if args.collect:
+        DATA_COLLECTION_MODE = True
+    if args.source:
+        DATA_COLLECTION_SOURCE = args.source
+    if args.prelabel:
+        DATA_COLLECTION_PRELABEL = True
+    if args.enable_early_exit:
+        ENABLE_EARLY_EXIT = True
+    if args.no_early_exit:
+        ENABLE_EARLY_EXIT = False
+    # If requested, clear collection CSV and output directory before running
+    if getattr(args, 'clear', False):
+        try:
+            # Delete collection CSV if it exists
+            if os.path.exists(DATA_COLLECTION_CSV):
+                try:
+                    os.remove(DATA_COLLECTION_CSV)
+                    logger.info(f"Removed collection CSV: {DATA_COLLECTION_CSV}")
+                except Exception:
+                    logger.exception(f"Failed to remove collection CSV: {DATA_COLLECTION_CSV}")
+
+            # Clear the output directory contents (don't remove the output root itself)
+            output_root = os.path.dirname(OUTPUT_BASE_DIR) or 'data/output'
+            if os.path.exists(output_root):
+                import shutil
+                for entry in os.listdir(output_root):
+                    path = os.path.join(output_root, entry)
+                    try:
+                        if os.path.isfile(path) or os.path.islink(path):
+                            os.remove(path)
+                        elif os.path.isdir(path):
+                            shutil.rmtree(path)
+                    except Exception:
+                        logger.exception(f"Failed to remove output path: {path}")
+                logger.info(f"Cleared output directory contents: {output_root}")
+        except Exception:
+            logger.exception('Cleanup (--clear) failed')
+
     main()
